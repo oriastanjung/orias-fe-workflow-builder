@@ -43,65 +43,214 @@ Click the **Gear Icon** on a node to open the Properties Sheet.
 
 ---
 
-## 🔌 Backend Integration Guide (Next Steps)
+## 🏛️ Technical Architecture (Backend Integration)
 
-Currently, the workflow runs on a **Mock Execution Engine** purely in the browser. To integrate with a real Python/Node.js backend, follow these steps:
+### 1. State Management (TypeScript Types)
+When running a workflow, data is passed between nodes. The structure should be consistent:
 
-### 1. Data Structure
-The workflow is stored as a JSON object containing `nodes` and `edges`. You can extract this via:
 ```typescript
-const { nodes, edges } = useWorkflowContext();
-const workflowJson = JSON.stringify({ nodes, edges });
-```
+// The state of a single execution step
+interface ExecutionLog {
+  nodeId: string;
+  status: "pending" | "running" | "completed" | "failed";
+  timestamp: number;
+  ioData: {
+      input: any;   // Data received from previous node
+      output: any;  // Data produced by this node
+  };
+}
 
-### 2. Execution Engine Replacement
-The core logic resides in `src/modules/workflow/services/ExecutionEngine.ts`. 
-
-**Current Logic (Mock):**
-```typescript
-// Inside executeNode()
-if (node.type === 'api_request') {
-    // Returns fake data
-    output = { users: [...] }; 
+// Data passed between nodes
+interface WorkflowContextData {
+  userId?: string;
+  chatHistory: string[];
+  variables: Record<string, any>; // Global variables
 }
 ```
 
-**Real Implementation (To-Do):**
-You should move the execution logic to the backend. The frontend `ExecutionEngine` should primarily:
-1.  Send the `inputMessage` + `workflowId` to the backend.
-2.  Receive a stream of "events" (Node Started, Node Finished) via WebSocket or SSE.
-3.  Update the UI based on these events.
+### 2. Database Schema (Prisma)
 
-**Recommended API Endpoints:**
+Here are the detailed schema definitions.
 
-#### `POST /api/workflows`
-Save the workflow JSON.
+#### Option A: PostgreSQL (Relational)
+*Note: Prisma does not support Composite Types for PostgreSQL, so strictly typed Nodes are stored as `Json`. You should validate this against the TypeScript interfaces in your API controller.*
+
+```prisma
+// schema.prisma
+
+model Workflow {
+  id          String   @id @default(uuid())
+  name        String
+  description String?
+  
+  // Stored as JSON, but follows the Node/Edge interface structure
+  nodes       Json     
+  edges       Json     
+  
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  executions  WorkflowExecution[]
+}
+
+model WorkflowExecution {
+  id          String    @id @default(uuid())
+  workflowId  String
+  workflow    Workflow  @relation(fields: [workflowId], references: [id])
+  status      String    @default("pending") // 'running', 'completed', 'failed'
+  
+  inputData   Json?     // Initial Trigger Data
+  outputData  Json?     // Final End Node Data
+  
+  startedAt   DateTime  @default(now())
+  completedAt DateTime?
+  
+  logs        ExecutionLog[]
+}
+
+model ExecutionLog {
+  id            String            @id @default(uuid())
+  executionId   String
+  execution     WorkflowExecution @relation(fields: [executionId], references: [id])
+  
+  nodeId        String
+  status        String
+  inputPayload  Json?
+  outputPayload Json?
+  errorMessage  String?
+  
+  createdAt     DateTime          @default(now())
+}
+```
+
+#### Option B: MongoDB (Document - Recommended)
+*MongoDB supports **Composite Attributes**, allowing us to define the strict structure of Nodes and Edges directly in the schema.*
+
+```prisma
+// schema.prisma
+
+datasource db {
+  provider = "mongodb"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// --- Composite Types for Strict Structure ---
+
+type WorkflowNode {
+  id       String
+  type     String    // 'trigger', 'message', 'condition', etc.
+  position NodePosition
+  data     Json      // Flexible data (label, message, url, etc.)
+}
+
+type NodePosition {
+  x Float
+  y Float
+}
+
+type WorkflowEdge {
+  id           String
+  source       String // Source Node ID
+  target       String // Target Node ID
+  sourceHandle String? // For Condition nodes ('true'/'false')
+}
+
+// --- Collections ---
+
+model Workflow {
+  id          String         @id @default(auto()) @map("_id") @db.ObjectId
+  name        String
+  description String?
+  
+  nodes       WorkflowNode[] // Array of strictly typed nodes
+  edges       WorkflowEdge[] // Array of strictly typed edges
+  
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+  
+  executions  WorkflowExecution[]
+}
+
+model WorkflowExecution {
+  id          String    @id @default(auto()) @map("_id") @db.ObjectId
+  workflowId  String    @db.ObjectId
+  workflow    Workflow  @relation(fields: [workflowId], references: [id])
+  status      String    @default("pending")
+  
+  inputData   Json?
+  outputData  Json?
+  
+  startedAt   DateTime  @default(now())
+  completedAt DateTime?
+  
+  logs        ExecutionLog[]
+}
+
+model ExecutionLog {
+  id            String            @id @default(auto()) @map("_id") @db.ObjectId
+  executionId   String            @db.ObjectId
+  execution     WorkflowExecution @relation(fields: [executionId], references: [id])
+  
+  nodeId        String
+  status        String
+  inputPayload  Json?
+  outputPayload Json?
+  errorMessage  String?
+  
+  createdAt     DateTime          @default(now())
+}
+```
+
+### 3. Real-time Updates (WebSocket / SSE)
+
+To achieve the "Working..." visual effect on the frontend while the backend processes:
+
+**Protocol**: Server-Sent Events (SSE) or WebSockets (`socket.io`).
+
+**Event Flow**:
+1.  **Frontend**: Connects to `ws://api.example.com/workflows/:id/stream`.
+2.  **Backend**: Begins processing the graph.
+3.  **Backend**: Emits updates as each node runs.
+
+**Event Payloads:**
+
+**Node Started:**
 ```json
 {
-  "name": "My Chat Flow",
-  "nodes": [...],
-  "edges": [...]
+  "event": "node_update",
+  "nodeId": "node-123",
+  "status": "running"
 }
 ```
+*Frontend Action: Show Blue Loading Spinner.*
 
-#### `POST /api/workflows/:id/execute`
-Run the workflow.
+**Node Completed:**
 ```json
 {
-  "input": "User message here"
+  "event": "node_update",
+  "nodeId": "node-123",
+  "status": "completed",
+  "output": { "data": "Hello World" }
 }
 ```
-**Response (Streaming/SSE):**
-```json
-{ "event": "node_start", "nodeId": "1" }
-{ "event": "node_finish", "nodeId": "1", "output": {...} }
-...
-```
+*Frontend Action: Show Green Checkmark & Update History Log.*
 
-### 3. Where to Modify Code
--   **`ExecutionEngine.ts`**: Replace the `run()` method to call your API instead of traversing the graph locally.
--   **`AIProcessNode`**: Currently mocks AI responses. Connect this to OpenAI/Gemini API on your backend.
--   **`ApiRequestNode`**: Currently mocks `randomuser.me`. Ensure your backend acts as a proxy if you want to avoid CORS issues from the browser.
+**Node Failed:**
+```json
+{
+  "event": "node_update",
+  "nodeId": "node-123",
+  "status": "failed",
+  "error": "API Timeout"
+}
+```
+*Frontend Action: Show Red X & Error Message.*
+
+---
 
 ## 📦 Tech Stack
 -   **React 18** + **Vite**
