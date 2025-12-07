@@ -9,7 +9,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Send, PlayCircle, Loader2, History } from "lucide-react";
+import { PlayCircle, Loader2, History } from "lucide-react";
 import { useSimulation } from "../hooks/useSimulation";
 import { SimulationHistory } from "./SimulationHistory";
 
