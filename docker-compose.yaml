@@ -1,0 +1,18 @@
+version: "3.8"
+
+services:
+  frontend:
+    build:
+      context: ..
+      dockerfile: frontend/Dockerfile
+    container_name: orias-shopcomm-frontend
+    restart: unless-stopped
+    environment:
+      PORT: 5173
+    ports:
+      - "5173:5173"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "VITE_BACKEND_URL"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
